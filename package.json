@@ -1,0 +1,35 @@
+{
+  "name": "tradingtrainer",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Practise trading Nasdaq-100 futures on replayed sessions, with coaching, lessons and progress stats.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "node tests/engine.test.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.6.0",
+    "@fontsource/barlow-condensed": "5.3.0",
+    "@fontsource/barlow-semi-condensed": "5.3.0",
+    "@fontsource/jetbrains-mono": "5.3.0",
+    "@supabase/ssr": "0.12.7",
+    "@supabase/supabase-js": "2.119.0",
+    "idb-keyval": "6.3.0",
+    "lightweight-charts": "5.2.1",
+    "next": "16.4.5",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=20.9"
+  }
+}
