@@ -7,6 +7,7 @@ import { TRAINER_MARKUP } from '@/lib/trainerMarkup';
 type Props = {
   signedIn: boolean;
   aiCoach: boolean;
+  realOwner: boolean;
   lesson: { slug: string; title: string; task: string } | null;
 };
 
@@ -21,7 +22,7 @@ async function requestReview(payload: unknown) {
   return json as { text: string };
 }
 
-export default function TrainerClient({ signedIn, aiCoach, lesson }: Props) {
+export default function TrainerClient({ signedIn, aiCoach, realOwner, lesson }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const lessonKey = lesson ? lesson.slug : '';
 
@@ -41,6 +42,7 @@ export default function TrainerClient({ signedIn, aiCoach, lesson }: Props) {
         tf: q.has('tf') ? Number(q.get('tf')) : undefined
       },
       lesson,
+      realData: { owner: realOwner },
       debug: q.has('debug')
     });
     return () => {
@@ -49,7 +51,7 @@ export default function TrainerClient({ signedIn, aiCoach, lesson }: Props) {
     };
     // The lesson object is recreated on every render; its slug identifies it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signedIn, aiCoach, lessonKey]);
+  }, [signedIn, aiCoach, realOwner, lessonKey]);
 
   return (
     <div ref={host} className="trainer-host">

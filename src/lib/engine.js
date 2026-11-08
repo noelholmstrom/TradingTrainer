@@ -107,8 +107,9 @@ function usHolidays(y) {
   };
   s = new Set([
     observed(d(1, 1)), nth(1, 1, 3), nth(2, 1, 3), addDays(easter(y), -2), lastMonday(5),
-    observed(d(6, 19)), observed(d(7, 4)), nth(9, 1, 1), nth(11, 4, 4), observed(d(12, 25))
+    observed(d(7, 4)), nth(9, 1, 1), nth(11, 4, 4), observed(d(12, 25))
   ]);
+  if (y >= 2022) s.add(observed(d(6, 19))); // Juneteenth, a market holiday since 2022
   holidayCache.set(y, s);
   return s;
 }
@@ -269,9 +270,9 @@ function SampleDataset(endDate) {
   };
 }
 
-function CsvDataset(name, bars) {
-  const n = bars.t.length;
-  const ranges = [];
+/** Split bars into Globex sessions: [[sessionDate, startIndex, endIndex), ...]. */
+function splitSessions(bars) {
+  const n = bars.t.length, ranges = [];
   let cur = null, start = 0;
   for (let i = 0; i < n; i++) {
     const d = sessionDateOf(bars.t[i]);
@@ -281,8 +282,24 @@ function CsvDataset(name, bars) {
     }
   }
   if (cur !== null) ranges.push([cur, start, n]);
+  return ranges;
+}
+const BAR_KEYS = ['t', 'o', 'h', 'l', 'c', 'v'];
+/** Copy bars [a, b) into new arrays (safe to store on their own). */
+function sliceBars(bars, a, b) {
+  const out = {};
+  for (const k of BAR_KEYS) out[k] = Float64Array.prototype.slice.call(bars[k], a, b);
+  return out;
+}
+function emptyBars() {
+  const out = {};
+  for (const k of BAR_KEYS) out[k] = new Float64Array(0);
+  return out;
+}
+
+function CsvDataset(name, bars) {
   const minBars = Math.max(6, Math.round(1800 / bars.baseSec));
-  const kept = ranges.filter(r => r[2] - r[1] >= minBars);
+  const kept = splitSessions(bars).filter(r => r[2] - r[1] >= minBars);
   const sub = (a, b) => ({
     t: bars.t.subarray(a, b), o: bars.o.subarray(a, b), h: bars.h.subarray(a, b),
     l: bars.l.subarray(a, b), c: bars.c.subarray(a, b), v: bars.v.subarray(a, b)
@@ -294,6 +311,34 @@ function CsvDataset(name, bars) {
     days: kept.map(r => r[0]),
     dayType() { return null; },
     session(i) { return sub(kept[i][1], kept[i][2]); }
+  };
+}
+
+// ------------------------------------------------------------ real data
+// Real CME sessions fetched on demand (see /api/bars). The calendar lists
+// every likely trading day; bars arrive later and are kept in a small cache.
+const FIRST_REAL_DAY = '2010-06-07';
+function RealDataset(startDate, endDate, maxCached) {
+  const days = [];
+  for (let d = startDate; d <= endDate; d = addDays(d, 1)) if (isTradingDay(d)) days.push(d);
+  const cap = maxCached || 120;
+  const cache = new Map();
+  const EMPTY = emptyBars();
+  return {
+    kind: 'real',
+    label: 'Real NQ futures (Databento)',
+    baseSec: 60,
+    days,
+    dayType() { return null; },
+    has(d) { return cache.has(d); },
+    touch(d) { const v = cache.get(d); if (v) { cache.delete(d); cache.set(d, v); } },
+    put(d, bars) {
+      cache.delete(d);
+      cache.set(d, bars);
+      while (cache.size > cap) cache.delete(cache.keys().next().value);
+    },
+    bars(d) { return cache.get(d) || EMPTY; },
+    session(i) { return cache.get(days[i]) || EMPTY; }
   };
 }
 
@@ -1129,7 +1174,7 @@ const TTEngine = {
   dateToMs, msToDate, addDays, dow, isTradingDay, usHolidays, easter,
   etOffset, toET, etToUtc, cetToUtc, sessionDateOf, etMinuteOfDay,
   SAMPLE_START, SESSION_MIN, buildSampleCalendar, genSampleSession, lastCompletedTradingDay,
-  SampleDataset, CsvDataset, assembleReplay, indexAtEtMinute,
+  SampleDataset, CsvDataset, RealDataset, FIRST_REAL_DAY, splitSessions, sliceBars, emptyBars, assembleReplay, indexAtEtMinute,
   bucketStart, createAgg, aggPush, aggregate,
   ema, sma, bollinger, rsi, macd, atr, vwap, roundTo,
   INSTRUMENTS, createBroker, bMark, bPlace, bCancel, bCancelAll, bModify, bSetBrackets,

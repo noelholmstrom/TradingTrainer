@@ -2,6 +2,7 @@
 
 Practise trading Nasdaq-100 futures (MNQ and NQ) on replayed sessions. Pick a day, step through it bar by bar, trade it with real order types, and get coached on every trade. Lessons, a journal and progress stats are built in.
 
+- **Real data:** actual CME Nasdaq-100 futures for any day since June 2010, through Databento (each trader's own key, or the site owner's).
 - **Replay:** any day or a random day with the date hidden; start at the Globex open, London, 08:30 or the 09:30 cash open; play, step or skip ahead. Bars after the cursor stay hidden.
 - **Chart:** 1m to 1h, EMA, VWAP, Bollinger Bands, volume, RSI, MACD, trend lines, horizontal lines, rectangles, Fibonacci and long/short position planners.
 - **Orders:** market, limit and stop with stop and target brackets you can drag on the chart; commission, slippage and gap fills.
@@ -80,30 +81,39 @@ It opens full screen on the replay, with its own icon.
 
 ## 6. Real market data
 
-The built-in sessions are **generated**: they behave like NQ (quiet Asia, London pick-up, 08:30 spikes, fast open, lunch lull) but are not history. To replay real days:
+The built-in sample sessions are **generated**: they behave like NQ (quiet Asia, London pick-up, 08:30 spikes, fast open, lunch lull) but are not history. The replay can also load **real CME Nasdaq-100 futures** (front-month NQ, 1-minute bars) for any day since June 2010, straight from [Databento](https://databento.com). Opening a day fetches that session plus the four before it (for the indicators and prior-day levels); days you have opened are kept in the browser, so opening them again costs nothing.
 
-1. Get 1-minute bars. `scripts/fetch_nq_databento.py` downloads NQ or MNQ from Databento (new accounts get free credits) and writes the right CSV:
-   ```sh
-   pip install databento
-   export DATABENTO_API_KEY=db-...        # Windows PowerShell: $env:DATABENTO_API_KEY="db-..."
-   python scripts/fetch_nq_databento.py --start 2025-01-01 --end 2025-04-01
-   ```
-   It prints the cost and asks before downloading. Add `--symbol MNQ` for the micro contract.
-   TradingView and NinjaTrader exports work too.
-2. In the replay, open **Data → Choose CSV file**, or drop the file onto the chart. The data stays in that browser.
+There are two ways to pay for and license that data:
 
-**Licensing:** data bought on a personal plan is for your own use. Offering real historical data to other users of a public site needs a vendor plan that allows redistribution. Until then, users bring their own files.
+- **Each trader uses their own key.** In the replay, open **Data**, paste a Databento API key and click **Save**. New Databento accounts get $125 of free credit, and each day uses a small amount of it. The key is kept in that browser and sent with each request for bars; the site doesn't store or log it.
+- **The site owner's key, for the owner only.** Add these in Vercel (**Settings → Environment Variables**), then redeploy:
+  ```sh
+  DATABENTO_API_KEY=db-...
+  DATA_OWNER_EMAILS=you@example.com   # accounts allowed to use the site's key, comma-separated
+  ```
+  Signed-in accounts on that list get real data on every device without pasting a key. This needs accounts (section 2).
+
+**Licensing:** real CME data is licensed to whoever pays for it. A personal Databento account covers your own use, which is why the site's key is limited to `DATA_OWNER_EMAILS` and everyone else brings their own key. Showing real data from your account to other users needs a distribution licence (for example Databento's plans that include external distribution).
+
+You can still import files: open **Data → Choose CSV file** in the replay, or drop a file onto the chart (the data stays in that browser). `scripts/fetch_nq_databento.py` downloads NQ or MNQ bars from Databento into the right format:
+```sh
+pip install databento
+export DATABENTO_API_KEY=db-...        # Windows PowerShell: $env:DATABENTO_API_KEY="db-..."
+python scripts/fetch_nq_databento.py --start 2025-01-01 --end 2025-04-01
+```
+It prints the cost and asks before downloading. TradingView and NinjaTrader exports work too.
 
 ## Project layout
 
 ```
-src/app/            pages: / (home), /replay, /learn, /stats, /login, /account, auth routes, /api/coach
+src/app/            pages: / (home), /replay, /learn, /stats, /login, /account, auth routes, /api/coach, /api/bars
 src/components/     React components (nav, trainer host, stats, lessons, auth forms)
 src/lib/engine.js   market data, indicators, order simulator, statistics, coaching rules (no DOM)
 src/lib/trainer.js  the replay screen: chart, orders on the chart, drawings, panels
 src/lib/journal.ts  where sessions are saved: browser (guest) or Supabase (signed in)
 src/lib/lessons.ts  lesson text and quizzes
 src/lib/coachPrompt.ts  the AI coach prompt and input checks
+src/lib/databento.js    Databento request and response handling for real bars
 supabase/migrations/    database tables and row-level security
 scripts/            Databento download script
 tests/              engine tests (npm test) and a browser test (tests/e2e.mjs)
@@ -119,9 +129,16 @@ npm i -D playwright && npx playwright install chromium
 node tests/e2e.mjs http://localhost:3000  # clicks through the whole site in a real browser
 ```
 
+To test real data without a Databento key, run the stand-in API and point the app at it:
+```sh
+node tests/mock-databento.mjs 4010
+DATABENTO_BASE_URL=http://localhost:4010 npm start
+node tests/e2e-real.mjs http://localhost:3000 http://localhost:4010
+```
+
 ## Next steps
 
-- Real data for every user: a licensed data source behind an API, instead of files per browser.
+- Real data for every user without their own key: needs a data licence that allows distribution.
 - More markets: OMXS30 and US stocks (the engine is market-agnostic; contract specs live in `INSTRUMENTS`).
 - Options module with modelled prices first (Black-Scholes from the underlying and an implied-volatility proxy).
 - Teacher features: share a scenario (day, start time, task) with a class and compare results.

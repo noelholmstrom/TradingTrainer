@@ -77,7 +77,7 @@ export default function Home() {
       </main>
       <footer className="site-foot">
         <span>TradingTrainer is an educational simulator. Nothing here is investment advice, and practice results do not predict real results.</span>
-        <span>Sample sessions are generated, not historical. Import your own data to replay real days.</span>
+        <span>Sample sessions are generated, not historical. Add a Databento key in the replay to trade real days.</span>
       </footer>
     </>
   );

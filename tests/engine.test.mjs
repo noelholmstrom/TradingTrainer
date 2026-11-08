@@ -1,5 +1,6 @@
 // Engine tests. Run: npm test
 import E from '../src/lib/engine.js';
+import * as DB from '../src/lib/databento.js';
 let fails = 0, passes = 0;
 function ok(cond, msg) { if (cond) passes++; else { fails++; console.log('FAIL:', msg); } }
 function near(a, b, eps, msg) { ok(Math.abs(a - b) <= (eps || 1e-9), `${msg} (got ${a}, want ${b})`); }
@@ -248,6 +249,59 @@ ok(csvDs.days.length >= 1, 'csv sessions grouped');
   ok(inside.some(n => n.key === 'fvg-entry'), 'credits an entry inside the gap');
   const sw = E.findSweeps({ t: bars.t, o: bars.o, h: Float64Array.from(bars.h, (x, i) => i === 955 ? 99999 : x), l: bars.l, c: bars.c }, 958, [{ key: 'x', name: 'the test high', price: 50000, kind: 'high' }], 15);
   ok(sw.length === 1, 'detects a sweep that closed back below the level');
+}
+
+// ---- real data: calendar, cache, session splitting
+ok(E.isTradingDay('2021-06-18'), 'Juneteenth was not a market holiday before 2022');
+ok(!E.isTradingDay('2022-06-20'), 'Juneteenth 2022 (observed Monday) closed');
+{
+  const real = E.RealDataset(E.FIRST_REAL_DAY, '2026-11-06', 3);
+  ok(real.kind === 'real' && real.days[0] === '2010-06-07', 'real calendar starts June 2010');
+  ok(real.days.includes('2021-06-18') && !real.days.includes('2024-07-04'), 'real calendar skips holidays only');
+  ok(real.session(5).t.length === 0, 'uncached real day is empty');
+  const sample = E.SampleDataset('2024-03-15');
+  const si = sample.days.indexOf('2024-03-12');
+  const days = ['2024-03-11', '2024-03-12', '2024-03-13', '2024-03-14'];
+  days.forEach((d, k) => real.put(d, sample.session(sample.days.indexOf(d))));
+  ok(!real.has('2024-03-11') && real.has('2024-03-14'), 'cache keeps only the newest entries');
+  real.touch('2024-03-12'); real.put('2024-03-15', sample.session(sample.days.indexOf('2024-03-15')));
+  ok(real.has('2024-03-12') && !real.has('2024-03-13'), 'touch keeps a day in the cache');
+  const big = E.RealDataset(E.FIRST_REAL_DAY, '2024-03-15');
+  for (const d of ['2024-03-08', '2024-03-11', '2024-03-12', '2024-03-13', '2024-03-14']) big.put(d, sample.session(sample.days.indexOf(d)));
+  const idx = big.days.indexOf('2024-03-14');
+  const rep = E.assembleReplay(big, idx, 4);
+  ok(rep.date === '2024-03-14' && rep.sessionEnd - rep.sessionStart === 1380 && rep.sessionStart === 4 * 1380, 'replay of a real day has 4 context sessions');
+  // join several sessions, then split them again
+  const all = E.assembleReplay(big, idx, 4).bars;
+  const ranges = E.splitSessions(all);
+  ok(ranges.length === 5 && ranges[0][0] === '2024-03-08' && ranges[4][0] === '2024-03-14', 'splitSessions finds each Globex day');
+  const one = E.sliceBars(all, ranges[2][1], ranges[2][2]);
+  ok(one.t.length === 1380 && one.t.buffer !== all.t.buffer, 'sliceBars copies one session');
+  ok(si >= 0, 'sample has the test day');
+}
+
+// ---- Databento parsing
+{
+  const line = (ts, o, h, l, c, v) => JSON.stringify({ hd: { ts_event: ts, rtype: 33, publisher_id: 1, instrument_id: 42140878 }, open: o, high: h, low: l, close: c, volume: v });
+  const text = [
+    line('2024-03-12T13:31:00.000000000Z', '18100.250000000', '18104.000000000', '18099.500000000', '18103.750000000', '412'),
+    line('2024-03-12T13:30:00.000000000Z', '18098.000000000', '18101.000000000', '18096.250000000', '18100.250000000', '1290'),
+    line('1710250320000000000', '18103750000000', '18106000000000', '18102000000000', '18105500000000', 230), // raw fixed-point + ns
+    line('2024-03-12T13:30:00.000000000Z', '18098.000000000', '18101.500000000', '18096.250000000', '18100.250000000', '1300'), // duplicate minute
+    'not json',
+    line('2024-03-12T13:33:00.000000000Z', '0', '0', '0', '0', '0'),
+    ''
+  ].join('\n');
+  const { bars, skipped } = DB.parseOhlcvJson(text);
+  ok(bars.t.length === 3, 'parsed three distinct minutes (got ' + bars.t.length + ')');
+  ok(bars.t[0] === Date.UTC(2024, 2, 12, 13, 30) / 1000 && bars.t[2] === Date.UTC(2024, 2, 12, 13, 32) / 1000, 'times sorted, in UTC seconds');
+  near(bars.c[2], 18105.5, 1e-9, 'fixed-point prices scaled');
+  ok(bars.v[0] === 1300 && bars.h[0] === 18101.5, 'duplicate minute keeps the later record');
+  ok(skipped === 2, 'skips bad lines (got ' + skipped + ')');
+  ok(DB.looksLikeDatabentoKey('db-' + 'A1'.repeat(14) + 'x') && !DB.looksLikeDatabentoKey('sk-abc') && !DB.looksLikeDatabentoKey('db-short'), 'key format check');
+  const f = DB.rangeForm({ symbol: 'NQ.v.0', start: '2024-03-11T22:00:00.000Z', end: '2024-03-12T21:00:00.000Z' });
+  ok(f.get('dataset') === 'GLBX.MDP3' && f.get('schema') === 'ohlcv-1m' && f.get('stype_in') === 'continuous' && f.get('encoding') === 'json', 'request form');
+  ok(/key/.test(DB.upstreamError(401).error) && DB.upstreamError(422, 'end after available end').error.includes('available end') && DB.upstreamError(503).status === 502, 'upstream errors explained');
 }
 
 console.log(`\n${passes} passed, ${fails} failed`);

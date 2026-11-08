@@ -73,6 +73,16 @@ export function mountTrainer(root, opts) {
     }
   };
 
+  // Real data: the site's own Databento key (owners only, decided on the server)
+  // or the trader's own key, which stays in this browser.
+  const REAL = opts.realData || { owner: false };
+  const dbnKey = {
+    get() { try { return localStorage.getItem('tt.dbnKey') || ''; } catch (e) { return ''; } },
+    set(k) { try { if (k) localStorage.setItem('tt.dbnKey', k); else localStorage.removeItem('tt.dbnKey'); } catch (e) { /* storage unavailable here */ } }
+  };
+  const realAvailable = () => !!(REAL.owner || dbnKey.get());
+  const KEY_RE = /^db-[A-Za-z0-9]{16,64}$/;
+
   // -------------------------------------------------------------- settings
   const DEFAULTS = {
     inst: 'MNQ', tf: 1, start: 570, speed: 5, blind: true, magnet: true, dataset: 'sample', csvTz: 'utc',
@@ -823,8 +833,13 @@ export function mountTrainer(root, opts) {
   }
 
   // ================================================================ replay
+  function datasetFor(kind) {
+    if (kind === 'csv' && st.csv) return st.csv.ds;
+    if (kind === 'real' && st.real && realAvailable()) return st.real;
+    return st.sample;
+  }
   function setDataset(kind) {
-    const ds = kind === 'csv' && st.csv ? st.csv.ds : st.sample;
+    const ds = datasetFor(kind);
     st.ds = ds;
     st.dayIndex = new Map(ds.days.map((d, i) => [d, i]));
     S.dataset = ds.kind;
@@ -847,12 +862,105 @@ export function mountTrainer(root, opts) {
       saveJournal(true);
     }
   }
+  // Real days are fetched before they open: the day plus CONTEXT_DAYS earlier
+  // sessions, from memory, then this browser's cache, then /api/bars.
+  async function ensureReal(ds, dayIdx) {
+    const need = ds.days.slice(Math.max(0, dayIdx - CONTEXT_DAYS), dayIdx + 1);
+    for (const d of need) {
+      if (ds.has(d)) continue;
+      const v = await IDB.get('real:NQ:' + d);
+      if (v && v.t && v.t.length) ds.put(d, v);
+    }
+    const missing = need.filter(d => !ds.has(d));
+    if (missing.length) {
+      const key = REAL.owner ? '' : dbnKey.get();
+      if (!REAL.owner && !key) throw new Error('Add your Databento API key under Data to load real days.');
+      let res, body = null;
+      try {
+        res = await fetch(`/api/bars?symbol=NQ&from=${missing[0]}&to=${missing[missing.length - 1]}`, {
+          headers: key ? { 'x-databento-key': key } : {},
+          credentials: 'same-origin'
+        });
+        body = await res.json().catch(() => null);
+      } catch (e) { throw new Error('Could not reach the server. Check your connection and try again.'); }
+      if (!res.ok || !body || !body.bars) throw new Error((body && body.error) || `Could not load real data (error ${res.status}).`);
+      const b = body.bars;
+      const bars = { t: Float64Array.from(b.t), o: Float64Array.from(b.o), h: Float64Array.from(b.h), l: Float64Array.from(b.l), c: Float64Array.from(b.c), v: Float64Array.from(b.v) };
+      const byDay = new Map(E.splitSessions(bars).map(([d, a, z]) => [d, E.sliceBars(bars, a, z)]));
+      for (const d of need) {
+        if (ds.has(d)) continue;
+        const s = byDay.get(d) || E.emptyBars();
+        ds.put(d, s);
+        if (s.t.length >= 30) IDB.put('real:NQ:' + d, s);
+      }
+    }
+    need.forEach(d => ds.touch(d));
+  }
+  function showLoading(text) {
+    const el = $('#chartEmpty');
+    el.textContent = text;
+    el.classList.add('busy');
+    el.hidden = false;
+  }
+  function hideLoading() {
+    const el = $('#chartEmpty');
+    el.classList.remove('busy');
+    if (st.rep) el.hidden = true;
+  }
+  let openSeq = 0;
+  /**
+   * Open a day on the current dataset. Resolves true when loaded, null when the day has no data,
+   * false on error, and 'stale' when a newer request (another day or data source) took over.
+   */
+  async function openDay(dayIdx, blind, quiet) {
+    const ds = st.ds;
+    if (!ds || dayIdx < 0 || dayIdx >= ds.days.length) return false;
+    const seq = ++openSeq;
+    if (ds.kind !== 'real') { st.loading = false; hideLoading(); loadSession(dayIdx, blind); return true; }
+    const date = ds.days[dayIdx];
+    st.loading = true;
+    showLoading(blind ? 'Loading a real session…' : `Loading ${dayLabel(date)}…`);
+    try {
+      await ensureReal(ds, dayIdx);
+    } catch (e) {
+      if (seq !== openSeq || destroyed) return 'stale';
+      st.loading = false;
+      hideLoading();
+      toast((e && e.message) || 'Could not load real data.', 'bad');
+      if (!st.rep) fallbackToSample(false);
+      return false;
+    }
+    if (seq !== openSeq || destroyed || st.ds !== ds) return 'stale';
+    st.loading = false;
+    hideLoading();
+    if (ds.session(dayIdx).t.length < 30) {
+      if (!quiet) toast(`No trading data for ${blind ? 'that day' : dayLabel(date)}. The market was probably closed.`, 'warn');
+      return null;
+    }
+    loadSession(dayIdx, blind);
+    return true;
+  }
+  /** Nothing loaded yet and real data failed: show the sample days instead. */
+  function fallbackToSample(random) {
+    setDataset('sample');
+    if (random) randomDay(); else loadSession(st.ds.days.length - 1, false);
+  }
+  /** The latest day that has data (real data can skip an unexpected closure). */
+  async function openLatest() {
+    const n = st.ds.days.length;
+    for (let i = n - 1; i >= Math.max(0, n - 6); i--) {
+      const r = await openDay(i, false, true);
+      if (r !== null) return r;
+    }
+    return false;
+  }
   function loadSession(dayIdx, blind) {
     if (!st.ds || dayIdx < 0 || dayIdx >= st.ds.days.length) return;
     pause();
     closeOutCurrent();
     st.dayIdx = dayIdx;
     st.rep = E.assembleReplay(st.ds, dayIdx, CONTEXT_DAYS);
+    st.rep.kind = st.ds.kind;
     if (S.tf * 60 < st.rep.baseSec) {
       S.tf = st.rep.baseSec / 60;
       $$('#tfGroup [data-tf]').forEach(x => x.setAttribute('aria-pressed', String(+x.dataset.tf === S.tf)));
@@ -1005,9 +1113,9 @@ export function mountTrainer(root, opts) {
     renderTransport(); renderClock(); renderStrip(); renderStripMarks(); renderTicket(); renderAccount(); renderCoach(); renderPanels(); updateLegend();
   }
   function renderDataChip() {
-    const csv = st.ds && st.ds.kind === 'csv';
-    $('#dataLabel').textContent = csv ? st.ds.label : 'Sample data';
-    $('#dataDot').classList.toggle('real', csv);
+    const kind = st.ds && st.ds.kind;
+    $('#dataLabel').textContent = kind === 'csv' ? st.ds.label : kind === 'real' ? 'Real NQ data' : 'Sample data';
+    $('#dataDot').classList.toggle('real', kind === 'csv' || kind === 'real');
     updateLegend();
   }
   function renderSessionControls() {
@@ -1359,7 +1467,7 @@ export function mountTrainer(root, opts) {
     const r = x => x == null || !isFinite(x) ? null : Math.round(x * 100) / 100;
     return {
       instrument: S.inst, pointValue: E.INSTRUMENTS[S.inst].pointValue, date: isBlind() ? null : st.rep.date,
-      dataset: st.ds.kind === 'sample' ? 'generated sample session' : 'imported market data',
+      dataset: st.ds.kind === 'sample' ? 'generated sample session' : st.ds.kind === 'real' ? 'real CME Nasdaq-100 futures data' : 'imported market data',
       trade: {
         side: t.side === 1 ? 'long' : 'short', contracts: t.qty, entryTime: etHM(t.entryTime), entry: r(t.entry), exitTime: etHM(t.exitTime), exit: r(t.exit),
         points: r(t.points), netUsd: r(t.net), rMultiple: t.r == null ? null : Math.round(t.r * 100) / 100, riskPts: r(t.riskPts),
@@ -1477,8 +1585,21 @@ export function mountTrainer(root, opts) {
   function renderDataPop(pop) {
     const csv = st.csv, active = st.ds && st.ds.kind;
     const info = csv ? `${esc(csv.ds.label)} · ${csv.ds.days.length} sessions · ${csv.ds.days[0]} to ${csv.ds.days[csv.ds.days.length - 1]} · ${csv.ds.baseSec / 60}-minute bars` : 'Import a CSV of bars to replay real days.';
+    const key = dbnKey.get(), realOk = realAvailable();
+    const realInfo = REAL.owner
+      ? `Actual CME Nasdaq-100 futures (front month), any day from June 2010 to the last finished session. Loaded with this site's Databento account.`
+      : key
+        ? `Actual CME Nasdaq-100 futures (front month), any day from June 2010 to the last finished session, loaded with your Databento key.`
+        : `Actual CME Nasdaq-100 futures, any day since June 2010. Add your Databento API key below to use it.`;
+    const keyBlock = REAL.owner ? '' : `<div class="key-block">` +
+      (key
+        ? `<div class="key-row"><span class="key-saved">Your key <code>${esc(key.slice(0, 5))}…${esc(key.slice(-4))}</code> is saved in this browser.</span><button type="button" class="btn small" id="dbnForget">Remove</button></div>`
+        : `<label class="key-label" for="dbnKey">Your Databento API key</label><div class="key-row"><input class="field" id="dbnKey" type="password" autocomplete="off" spellcheck="false" placeholder="db-…"><button type="button" class="btn primary small" id="dbnSave">Save</button></div>`) +
+      `<p class="hint">Get a key at <a href="https://databento.com" target="_blank" rel="noopener noreferrer">databento.com</a>. New accounts get $125 of free credit, and each day you open uses a small amount of it. Your key stays in this browser and is only sent to load bars.</p></div>`;
     pop.innerHTML = `<h3>Market data</h3>` +
       `<div class="opt" role="radio" tabindex="0" data-ds="sample" aria-checked="${active === 'sample'}"><span><b>Sample sessions</b><small>Generated Nasdaq-100 futures days with a quiet overnight, the London pick-up, 08:30 data spikes, a fast cash open and a lunch lull. Useful for practice. Not real history.</small></span></div>` +
+      `<div class="opt" role="radio" tabindex="0" data-ds="real" aria-checked="${active === 'real'}" ${realOk ? '' : 'aria-disabled="true"'}><span><b>Real NQ futures</b><small>${realInfo}</small></span></div>` +
+      keyBlock +
       `<div class="opt" role="radio" tabindex="${csv ? 0 : -1}" data-ds="csv" aria-checked="${active === 'csv'}" ${csv ? '' : 'aria-disabled="true"'}><span><b>Your CSV</b><small>${info}</small></span></div>` +
       `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="btn primary file-btn">Choose CSV file<input type="file" accept=".csv,.txt,text/csv" id="csvFile" aria-label="Choose CSV file"></span>` +
       `<label class="chk" style="font-size:12.5px">Times without a zone are <select class="field small" style="width:auto" id="csvTz"><option value="utc">UTC</option><option value="ny">New York</option><option value="cet">Stockholm</option></select></label></div>` +
@@ -1551,19 +1672,51 @@ export function mountTrainer(root, opts) {
   }
 
   // ============================================================= wiring
-  function pickDay(value) {
+  async function pickDay(value) {
     const ds = st.ds;
-    if (!ds || !value) return;
+    if (!ds || !value) return false;
     let i = ds.days.findIndex(d => d >= value);
     if (i < 0) i = ds.days.length - 1;
-    if (ds.days[i] !== value) toast(`No session on ${dayLabel(value)}. Loaded ${dayLabel(ds.days[i])} instead.`);
-    loadSession(i, false);
+    const r = await openDay(i, false);
+    if (r === true && ds.days[i] !== value) toast(`No session on ${dayLabel(value)}. Loaded ${dayLabel(ds.days[i])} instead.`);
+    return r;
   }
-  function randomDay() {
+  async function randomDay() {
     const n = st.ds.days.length, lo = Math.min(n - 1, CONTEXT_DAYS);
-    let i = lo + Math.floor(Math.random() * (n - lo));
-    if (n > lo + 1 && i === st.dayIdx) i = lo + ((i - lo + 1) % (n - lo));
-    loadSession(i, S.blind);
+    for (let tries = 0; tries < 3; tries++) {
+      let i = lo + Math.floor(Math.random() * (n - lo));
+      if (n > lo + 1 && i === st.dayIdx) i = lo + ((i - lo + 1) % (n - lo));
+      const r = await openDay(i, S.blind, tries < 2);
+      if (r !== null) return r;
+    }
+    return null;
+  }
+  /** Switch data source and open its latest day; goes back to the previous source if that fails. */
+  async function switchDataset(kind) {
+    const prev = st.ds ? st.ds.kind : 'sample';
+    setDataset(kind);
+    const r = await openLatest();
+    if (r === 'stale') return r; // something newer took over; leave the data source as it is now
+    if (!r && st.ds.kind !== prev) {
+      setDataset(prev);
+      if (!st.rep) loadSession(st.ds.days.length - 1, false);
+    }
+    if (openPop && openPop.pop.id === 'popData') renderDataPop($('#popData'));
+    return r;
+  }
+  function saveDbnKey() {
+    const input = $('#dbnKey');
+    const k = ((input && input.value) || '').trim();
+    if (!KEY_RE.test(k)) { toast("That doesn't look like a Databento API key. Keys start with db-.", 'bad'); if (input) input.focus(); return; }
+    dbnKey.set(k);
+    toast('Key saved in this browser. Loading real data…', 'good');
+    switchDataset('real');
+  }
+  function forgetDbnKey() {
+    dbnKey.set('');
+    toast('Key removed from this browser.');
+    if (st.ds && st.ds.kind === 'real' && !REAL.owner) switchDataset('sample');
+    else renderDataPop($('#popData'));
   }
   function stepperClick(kind, dir) {
     const tick = E.INSTRUMENTS[S.inst].tick;
@@ -1612,14 +1765,21 @@ export function mountTrainer(root, opts) {
     });
     const pickDs = el => {
       const opt = el.closest('[data-ds]');
-      if (!opt || opt.getAttribute('aria-disabled') === 'true') return;
+      if (!opt) return;
+      if (opt.dataset.ds === 'real' && !realAvailable()) { const k = $('#dbnKey'); if (k) k.focus(); return; }
+      if (opt.getAttribute('aria-disabled') === 'true') return;
       if (opt.dataset.ds === (st.ds && st.ds.kind)) return;
-      setDataset(opt.dataset.ds);
-      loadSession(st.ds.days.length - 1, false);
-      renderDataPop($('#popData'));
+      switchDataset(opt.dataset.ds);
     };
-    $('#popData').addEventListener('click', e => pickDs(e.target));
-    $('#popData').addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('[data-ds]')) { e.preventDefault(); pickDs(e.target); } });
+    $('#popData').addEventListener('click', e => {
+      if (e.target.id === 'dbnSave') saveDbnKey();
+      else if (e.target.id === 'dbnForget') forgetDbnKey();
+      else pickDs(e.target);
+    });
+    $('#popData').addEventListener('keydown', e => {
+      if (e.target.id === 'dbnKey' && e.key === 'Enter') { e.preventDefault(); saveDbnKey(); return; }
+      if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('[data-ds]')) { e.preventDefault(); pickDs(e.target); }
+    });
     on(document, 'mousedown', e => {
       if (openPop && !openPop.pop.contains(e.target) && !openPop.btn.contains(e.target)) closePopovers();
     });
@@ -1629,10 +1789,10 @@ export function mountTrainer(root, opts) {
     $('#chkBlind').addEventListener('change', e => { S.blind = e.target.checked; saveSettings(); });
     $('#startSel').addEventListener('change', e => {
       S.start = +e.target.value; saveSettings();
-      if (st.rep && st.broker && !st.broker.fills.length) loadSession(st.dayIdx, st.blindActive && !st.ended);
+      if (st.rep && st.broker && !st.broker.fills.length) openDay(st.dayIdx, st.blindActive && !st.ended);
       else toast('The new start time applies when you restart or load another day.');
     });
-    $('#btnRestart').addEventListener('click', () => { if (st.rep) loadSession(st.dayIdx, st.blindActive); });
+    $('#btnRestart').addEventListener('click', () => { if (st.rep) openDay(st.dayIdx, st.blindActive); });
     $('#btnPlay').addEventListener('click', togglePlay);
     $('#btnStep').addEventListener('click', () => step());
     $('#speedSel').addEventListener('change', e => { S.speed = +e.target.value; saveSettings(); });
@@ -1713,7 +1873,7 @@ export function mountTrainer(root, opts) {
       const m = t.dataset.m;
       if (m === 'back' && e.target !== t) return;
       closeModal();
-      if (m === 'same') loadSession(st.dayIdx, false);
+      if (m === 'same') openDay(st.dayIdx, false);
       if (m === 'random') randomDay();
     });
 
@@ -1830,8 +1990,11 @@ export function mountTrainer(root, opts) {
     cleanups.push(() => mo.disconnect());
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (chart && !destroyed) { chart.applyOptions({ layout: { fontFamily: FONT_MONO } }); requestOverlays(); renderStripStatic(); } });
 
-    st.sample = E.SampleDataset(E.lastCompletedTradingDay(Date.now()));
-    setDataset('sample');
+    const lastDay = E.lastCompletedTradingDay(Date.now());
+    st.sample = E.SampleDataset(lastDay);
+    st.real = E.RealDataset(E.FIRST_REAL_DAY, lastDay);
+    const wanted = S.dataset;
+    setDataset(wanted === 'real' ? 'real' : 'sample');
     const P = opts.params || {};
     if (P.start != null && isFinite(+P.start) && [1080, 180, 480, 510, 540, 570, 600, 720, 840, 930].includes(+P.start)) S.start = +P.start;
     if (P.blind != null) S.blind = !!P.blind;
@@ -1844,23 +2007,26 @@ export function mountTrainer(root, opts) {
       card.innerHTML = `<h2>Practice <span class="aside">${esc(opts.lesson.title)}</span></h2><p class="lesson-task">${esc(opts.lesson.task)}</p><a class="btn" href="/learn/${encodeURIComponent(opts.lesson.slug)}">Back to the lesson</a>`;
       card.hidden = false;
     }
-    if (P.random) randomDay();
-    else if (P.day) pickDay(P.day);
-    else loadSession(st.ds.days.length - 1, false);
     initJournal();
+    if (P.random) await randomDay();
+    else if (P.day) await pickDay(P.day);
+    else await openLatest();
+    if (destroyed) return;
+    // Real data could not load (for example a rejected key): fall back to the sample days,
+    // unless a newer request (the trader already picked something) is still loading.
+    if (!st.rep && !st.loading) fallbackToSample(!!P.random);
 
     const saved = await IDB.get('csv');
     if (destroyed) return;
     if (saved && saved.bars && saved.bars.t && saved.bars.t.length) {
       try {
         st.csv = { ds: E.CsvDataset(saved.name || 'Imported CSV', saved.bars) };
-        if (S.dataset === 'csv' && st.csv.ds.days.length && st.broker && !st.broker.fills.length && !st.playing) {
+        if (wanted === 'csv' && !P.random && !P.day && st.csv.ds.days.length && st.broker && !st.broker.fills.length && !st.playing) {
           setDataset('csv');
           loadSession(st.ds.days.length - 1, false);
         }
       } catch (e) { st.csv = null; }
     }
-    if (S.dataset === 'csv' && !st.csv) { S.dataset = 'sample'; saveSettings(); }
   }
   if (opts.debug) window.__tt = { st, S, E, get chart() { return chart; }, journal, y: p => priceToY(p) };
   boot();
