@@ -29,20 +29,21 @@ The site runs without any accounts or keys. In that **guest mode** the journal i
 
 ## 2. Turn on accounts (Supabase, free tier is enough)
 
-1. Create a project at <https://supabase.com>.
-2. In the project, open **SQL Editor**, paste the contents of `supabase/migrations/0001_init.sql` and click **Run**. This creates the tables and locks each one so users only ever see their own rows.
+1. Create a project at <https://supabase.com> (keep the default security options).
+2. In the project, open **SQL Editor**, paste the contents of `supabase/migrations/0001_init.sql` and click **Run**. This creates the tables, gives signed-in users access to them and locks each one so users only ever see their own rows.
 3. Open **Authentication → URL Configuration**:
-   - **Site URL:** `http://localhost:3000` for now (change it to your real address once the site is online).
-   - **Redirect URLs:** add `http://localhost:3000/auth/callback` and, later, `https://YOUR-DOMAIN/auth/callback`.
-4. Open **Project Settings → API Keys** and copy the **Project URL** and the **publishable key**.
-5. Copy `.env.example` to `.env.local` and fill in:
+   - **Site URL:** your site's address, e.g. `https://your-site.vercel.app` (or `http://localhost:3000` if you only run it locally).
+   - **Redirect URLs:** add `https://your-site.vercel.app/**` and `http://localhost:3000/**`.
+4. Click **Connect** at the top of the project page and pick **Next.js**. It shows the two values you need:
    ```sh
    NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
    NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
    ```
-6. Stop and restart `npm run dev`. A **Sign in** button appears in the top bar.
+5. Put them in Vercel (**Settings → Environment Variables**, then redeploy) or, to run locally, in a `.env.local` file copied from `.env.example`, then restart `npm run dev`. A **Sign in** button appears in the top bar.
 
-Sign-up sends a confirmation email. Supabase's built-in email sender is meant for testing and is heavily rate-limited, so set up your own SMTP provider under **Authentication → Emails** before you invite other people. If you would rather skip confirmation while testing, turn off **Confirm email** under **Authentication → Sign In / Providers → Email**.
+**Emails:** Supabase's built-in email sender only delivers to the email addresses of your Supabase team (that is, you) and only a couple of messages per hour. So that other people can sign up, turn off **Confirm email** in the Email provider settings (**Authentication → Sign In / Providers**). Sign-in links and password-reset emails still only reach your own address until you add your own SMTP provider under **Authentication → Emails**, which needs a domain of your own.
+
+**Free plan:** Supabase pauses free projects after 7 days of low activity (it emails a warning first). If sign-in stops working after a quiet spell, open the project in Supabase and click **Resume project**.
 
 Sessions traded as a guest stay in that browser. After signing in, the Stats page offers to move them into the account.
 

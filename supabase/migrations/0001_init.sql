@@ -63,6 +63,15 @@ create table if not exists public.coach_requests (
 );
 create index if not exists coach_requests_user_idx on public.coach_requests (user_id, created_at desc);
 
+-- --------------------------------------------------------- Data API access
+-- New Supabase projects (since May 2026) no longer expose new tables to the API automatically.
+-- Signed-in users may use these tables; the row-level security below limits them to their own rows.
+-- Visitors who are not signed in (the anon role) get no access.
+grant select, insert, update, delete on public.sessions        to authenticated;
+grant select, insert, update, delete on public.trades          to authenticated;
+grant select, insert, update, delete on public.lesson_progress to authenticated;
+grant select, insert                 on public.coach_requests  to authenticated;
+
 -- ------------------------------------------------------ row-level security
 alter table public.sessions        enable row level security;
 alter table public.trades          enable row level security;
