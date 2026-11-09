@@ -5,6 +5,7 @@
 import E from './engine.js';
 import * as LWC from 'lightweight-charts';
 import { lineChart, hourBars } from './charts.js';
+import { ICT_DEFAULTS, FVG, IFVG, createIct, ictStep, biasPanel } from './ict.js';
 
 export function mountTrainer(root, opts) {
   opts = opts || {};
@@ -18,7 +19,7 @@ export function mountTrainer(root, opts) {
   const MINUS = '−';
   const FONT_MONO = '"JetBrains Mono", ui-monospace, Menlo, Consolas, monospace';
   const FONT_UI = '"Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif';
-  const CONTEXT_DAYS = 4;
+  const CONTEXT_DAYS = 5; // earlier sessions loaded before the replay day (indicators, prior-day levels, the weekly gap)
   const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const pad2 = n => String(n).padStart(2, '0');
@@ -92,7 +93,9 @@ export function mountTrainer(root, opts) {
       vwap: { on: true, anchor: 'eth' }, bb: { on: false, len: 20, mult: 2 }, vol: { on: true },
       rsi: { on: true, len: 14 }, macd: { on: true, fast: 12, slow: 26, signal: 9 }
     },
-    commission: { MNQ: 0.5, NQ: 2 }, slippage: 1, limitThrough: false, pauseOnFill: true, balance: 50000
+    commission: { MNQ: 0.5, NQ: 2 }, slippage: 1, limitThrough: false, pauseOnFill: true, balance: 50000,
+    ict: Object.assign({}, ICT_DEFAULTS),
+    layout: { side: true, bottomH: 0, bottomMin: false }
   };
   function merge(a, b) {
     if (Array.isArray(a)) return Array.isArray(b) && b.length === a.length ? a.map((x, i) => merge(x, b[i])) : a;
@@ -124,11 +127,28 @@ export function mountTrainer(root, opts) {
       buy: tok('--buy'), accent: tok('--accent'), accentSoft: tok('--accent-soft'), good: tok('--good'), bad: tok('--bad'),
       s1: tok('--series-1'), s2: tok('--series-2'), s3: tok('--series-3'), s4: tok('--series-4'), sN: tok('--series-neutral')
     };
+    // ICT Levels Helper colours: the indicator's TradingView defaults, a few darkened for the light theme
+    const light = isLightColor(C.bg);
+    C.ict = {
+      fvgB: '#00897B', fvgS: '#880E4F', ifvgB: '#00BCD4', ifvgS: '#9C27B0', rbB: '#2196F3', rbS: '#E040FB',
+      asia: light ? '#C9A100' : '#FFEB3B', ldn: '#E040FB', ny: '#00BCD4',
+      nwUp: light ? '#00A152' : '#00E676', nwDn: '#FF9800', pd: '#787B86', mo: light ? '#363A45' : '#FFFFFF', gray: '#787B86'
+    };
+  }
+  function isLightColor(col) {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(col || '');
+    if (!m) return false;
+    const [r, g, b] = [m[1], m[2], m[3]].map(x => parseInt(x, 16));
+    return (0.299 * r + 0.587 * g + 0.114 * b) > 150;
+  }
+  function rgba(hex, a) {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex);
+    return m ? `rgba(${parseInt(m[1], 16)},${parseInt(m[2], 16)},${parseInt(m[3], 16)},${a})` : hex;
   }
   const emaColor = k => [C.s1, C.s2, C.s3, C.sN][k];
 
   // ================================================================== chart
-  let chart, candle, markersApi, overlay, drawPrim;
+  let chart, candle, markersApi, overlay, drawPrim, ictPrim;
   const ind = { vol: null, emas: [], vwap: null, bb: [], rsi: null, macdH: null, macdL: null, macdS: null };
   const isBlind = () => st.blindActive && !st.ended;
 
@@ -213,7 +233,7 @@ export function mountTrainer(root, opts) {
     let panes = chart.panes();
     for (let i = panes.length - 1; i >= pane; i--) chart.removePane(i);
     panes = chart.panes();
-    panes.forEach((p, i) => p.setStretchFactor(i === 0 ? (panes.length > 2 ? 3.4 : 4) : 1));
+    panes.forEach((p, i) => p.setStretchFactor(i === 0 ? 5 : 1));
   }
 
   function computeInd() {
@@ -243,8 +263,10 @@ export function mountTrainer(root, opts) {
     if (ind.rsi) ind.rsi.setData(seriesData(iv.rsi));
     if (ind.macdH) { ind.macdH.setData(a.time.map((t, i) => histPt(t, iv.macd.hist[i]))); ind.macdL.setData(seriesData(iv.macd.macd)); ind.macdS.setData(seriesData(iv.macd.signal)); }
     updateMarkers();
+    syncIct();
     requestOverlays();
     updateLegend();
+    renderIctPanel();
   }
   function renderStep() {
     const a = st.agg, i = a.time.length - 1, t = a.time[i];
@@ -257,6 +279,9 @@ export function mountTrainer(root, opts) {
     if (ind.bb.length) { ind.bb[0].update(pt(t, iv.bb.up[i])); ind.bb[1].update(pt(t, iv.bb.mid[i])); ind.bb[2].update(pt(t, iv.bb.lo[i])); }
     if (ind.rsi) ind.rsi.update(pt(t, iv.rsi[i]));
     if (ind.macdH) { ind.macdH.update(histPt(t, iv.macd.hist[i])); ind.macdL.update(pt(t, iv.macd.macd[i])); ind.macdS.update(pt(t, iv.macd.signal[i])); }
+    syncIct();
+    if (ictPrim && ictPrim.req) ictPrim.req();
+    renderIctPanel();
   }
   function rebuildAgg() { st.agg = E.aggregate(st.rep.bars, 0, st.cursor, tfSec()); }
   function fitRecent() {
@@ -483,6 +508,218 @@ export function mountTrainer(root, opts) {
     }
   }
 
+  // ------------------------------------------- ICT Levels Helper overlay
+  // Noel's TradingView indicator (v5.0), worked out candle by candle on closed candles only.
+  const ictState = { s: null, agg: null, sig: '' };
+  /** Candles that have closed: all but the last one while it is still forming. */
+  function ictClosedCount() {
+    const a = st.agg;
+    if (!a || !a.time.length) return 0;
+    const n = a.time.length;
+    if (st.ended || !st.rep) return n;
+    const endWall = E.toET(st.rep.bars.t[st.cursor]) + st.rep.baseSec;
+    return endWall >= a.time[n - 1] + a.tfSec ? n : n - 1;
+  }
+  function syncIct() {
+    if (!S.ict.on || !st.agg) { ictState.s = null; return; }
+    const sig = JSON.stringify(S.ict);
+    if (!ictState.s || ictState.agg !== st.agg || ictState.sig !== sig || ictState.s.i >= ictClosedCount()) {
+      ictState.s = createIct(S.ict, E.INSTRUMENTS[S.inst].tick);
+      ictState.agg = st.agg;
+      ictState.sig = sig;
+    }
+    const upto = ictClosedCount();
+    for (let i = ictState.s.i + 1; i < upto; i++) ictStep(ictState.s, st.agg, i);
+  }
+  const ictZoneColor = z => {
+    const P = C.ict;
+    return z.kind === FVG ? (z.dir === 1 ? P.fvgB : P.fvgS) : z.kind === IFVG ? (z.dir === 1 ? P.ifvgB : P.ifvgS) : (z.dir === 1 ? P.rbB : P.rbS);
+  };
+  const ictSessions = () => [['asia', S.ict.asia, C.ict.asia], ['ldn', S.ict.london, C.ict.ldn], ['ny', S.ict.ny, C.ict.ny]];
+  function ictLine(ctx, x0, x1, y, color, width, dash) {
+    if (bad(x0, x1, y)) return;
+    hLine(ctx, Math.min(x0, x1), Math.max(x0, x1), y, color, width, dash);
+  }
+  function ictText(ctx, x, y, text, color, align) {
+    ctx.font = `500 10px ${FONT_MONO}`;
+    ctx.textAlign = align || 'left';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = C.bg; ctx.lineWidth = 3; ctx.strokeText(text, x, y);
+    ctx.fillStyle = color; ctx.fillText(text, x, y);
+  }
+  function drawIctBack(ctx) {
+    const s = ictState.s, c = s.cfg, X = i => chart.timeScale().logicalToCoordinate(i), last = st.agg.time.length - 1, P = C.ict;
+    for (const z of s.zones) {
+      const x0 = X(z.left), x1 = X(last), y0 = priceToY(z.top), y1 = priceToY(z.bot);
+      if (bad(x0, x1, y0, y1)) continue;
+      ctx.fillStyle = rgba(ictZoneColor(z), z.mit ? 0.10 : 0.12);
+      ctx.fillRect(x0, Math.min(y0, y1), x1 - x0, Math.abs(y1 - y0));
+    }
+    if (c.sessShade) {
+      for (const [key, show, col] of ictSessions()) {
+        if (!show) continue;
+        for (const r of s.sess[key].hist) {
+          const x0 = X(r.start), x1 = X(r.end), y0 = priceToY(r.hi), y1 = priceToY(r.lo);
+          if (bad(x0, x1, y0, y1)) continue;
+          ctx.fillStyle = rgba(col, 0.06); ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+          ctx.strokeStyle = rgba(col, 0.15); ctx.lineWidth = 1; ctx.strokeRect(x0 + 0.5, y0 + 0.5, x1 - x0, y1 - y0);
+        }
+      }
+    }
+    if (c.nwog) {
+      for (const g of s.nwogs) {
+        const x0 = X(g.start), x1 = X(g.end == null ? last : g.end), y0 = priceToY(g.top), y1 = priceToY(g.bot);
+        if (bad(x0, x1, y0, y1)) continue;
+        const dim = g.filled && c.nwogDim;
+        ctx.fillStyle = dim ? rgba(P.gray, 0.07) : rgba(g.up ? P.nwUp : P.nwDn, 0.12);
+        ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+      }
+    }
+  }
+  function drawIctFront(ctx, W) {
+    const s = ictState.s, c = s.cfg, X = i => chart.timeScale().logicalToCoordinate(i), last = st.agg.time.length - 1, P = C.ict;
+    const xLast = X(last), edge = [];
+    // zones: border (solid FVG, dashed IFVG, dotted RB), CE midline, label
+    for (const z of s.zones) {
+      const col = ictZoneColor(z), x0 = X(z.left), x1 = xLast, y0 = priceToY(z.top), y1 = priceToY(z.bot);
+      if (bad(x0, x1, y0, y1)) continue;
+      ctx.save();
+      ctx.strokeStyle = rgba(col, z.mit ? 0.55 : 1); ctx.lineWidth = 1;
+      ctx.setLineDash(z.kind === FVG ? [] : z.kind === IFVG ? [5, 4] : [1.5, 3]);
+      ctx.strokeRect(Math.round(x0) + 0.5, Math.round(Math.min(y0, y1)) + 0.5, Math.round(x1 - x0), Math.round(Math.abs(y1 - y0)));
+      ctx.restore();
+      if (z.ce) ictLine(ctx, x0, x1, (y0 + y1) / 2, rgba(col, 0.65), 1, [2, 3]);
+      if (x1 - x0 > 34 && Math.abs(y1 - y0) > 9) {
+        ctx.font = `600 9.5px ${FONT_UI}`; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+        ctx.fillStyle = rgba(col, z.mit ? 0.65 : 1);
+        ctx.fillText(z.kind === FVG ? 'FVG' : z.kind === IFVG ? 'IFVG' : 'RB', x1 - 4, Math.min(y0, y1) + 2);
+      }
+    }
+    // sessions: high and low from the session start, extended once the session has closed
+    for (const [key, show, col] of ictSessions()) {
+      if (!show) continue;
+      for (const r of s.sess[key].hist) {
+        const cur = r.stop == null, xe = X(cur ? (c.sessExt ? last : r.drawn) : r.stop), x0 = X(r.start);
+        const hiCol = c.sessDim && r.hiSwept ? rgba(P.gray, 0.65) : col, loCol = c.sessDim && r.loSwept ? rgba(P.gray, 0.65) : col;
+        ictLine(ctx, x0, xe, priceToY(r.hi), hiCol, 2, c.sessDim && r.hiSwept ? [2, 3] : null);
+        ictLine(ctx, x0, xe, priceToY(r.lo), loCol, 2, c.sessDim && r.loSwept ? [2, 3] : null);
+        if (c.sessMid) ictLine(ctx, x0, xe, priceToY((r.hi + r.lo) / 2), rgba(col, 0.45), 1, [2, 3]);
+        if (c.sessLabels) {
+          const hi = { y: priceToY(r.hi), text: `${r.name} H ${fmtPx(r.hi)}${r.hiSwept ? ' ·swept' : ''}`, color: c.sessDim && r.hiSwept ? rgba(P.gray, 0.85) : col };
+          const lo = { y: priceToY(r.lo), text: `${r.name} L ${fmtPx(r.lo)}${r.loSwept ? ' ·swept' : ''}`, color: c.sessDim && r.loSwept ? rgba(P.gray, 0.85) : col };
+          if (cur) edge.push(hi, lo);
+          else for (const L of [hi, lo]) if (!bad(xe, L.y)) ictText(ctx, xe + 4, L.y, L.text, L.color);
+        }
+      }
+    }
+    // New Week Opening Gap
+    if (c.nwog) {
+      for (const g of s.nwogs) {
+        const act = g.end == null, x0 = X(g.start), x1 = X(act ? last : g.end), y0 = priceToY(g.top), y1 = priceToY(g.bot);
+        if (bad(x0, x1, y0, y1)) continue;
+        const col = g.up ? P.nwUp : P.nwDn, dim = g.filled && c.nwogDim;
+        ctx.strokeStyle = dim ? rgba(P.gray, 0.4) : col; ctx.lineWidth = 1;
+        ctx.strokeRect(Math.round(x0) + 0.5, Math.round(y0) + 0.5, Math.round(x1 - x0), Math.round(y1 - y0));
+        if (c.nwogCE) ictLine(ctx, x0, x1, (y0 + y1) / 2, rgba(col, 0.8), 1, [2, 3]);
+        const L = { y: y0, text: `NWOG ${g.up ? '▲' : '▼'} ${g.gap.toFixed(2)}`, color: col };
+        if (act) edge.push(L); else ictText(ctx, x1 + 4, L.y, L.text, L.color);
+      }
+    }
+    // previous day high/low and the 00:00 open, from the start of the New York day
+    const D = s.day;
+    if (D.start >= 0) {
+      const x0 = X(D.start);
+      if (c.pd && Number.isFinite(D.pdH)) {
+        ictLine(ctx, x0, xLast, priceToY(D.pdH), P.pd, 2, [6, 4]);
+        ictLine(ctx, x0, xLast, priceToY(D.pdL), P.pd, 2, [6, 4]);
+        edge.push({ y: priceToY(D.pdH), text: 'PDH', color: P.pd }, { y: priceToY(D.pdL), text: 'PDL', color: P.pd });
+      }
+      if (c.mo && Number.isFinite(D.mo)) {
+        ictLine(ctx, x0, xLast, priceToY(D.mo), rgba(P.mo, 0.9), 2, [2, 3]);
+        edge.push({ y: priceToY(D.mo), text: '00:00', color: P.mo });
+      }
+    }
+    // labels at the current candle, nudged apart so they don't sit on top of each other
+    if (bad(xLast)) return;
+    const rows = edge.filter(L => !bad(L.y)).sort((a, b) => a.y - b.y);
+    let prev = -Infinity;
+    ctx.font = `500 10px ${FONT_MONO}`;
+    for (const L of rows) {
+      const y = Math.max(L.y, prev + 12);
+      prev = y;
+      const w = ctx.measureText(L.text).width;
+      ictText(ctx, Math.min(xLast + 10, W - w - 4), y, L.text, L.color);
+    }
+  }
+  class IctPrimitive {
+    constructor() {
+      this.req = null;
+      this.views = [
+        { zOrder: () => 'bottom', renderer: () => ({ draw: tg => this.draw(tg, true) }) },
+        { zOrder: () => 'normal', renderer: () => ({ draw: tg => this.draw(tg, false) }) }
+      ];
+    }
+    attached(p) { this.req = p.requestUpdate; }
+    detached() { this.req = null; }
+    paneViews() { return S.ict.on && ictState.s && st.agg ? this.views : []; }
+    draw(tg, back) {
+      if (!ictState.s || !st.agg || !st.agg.time.length) return;
+      tg.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
+        ctx.save();
+        if (back) drawIctBack(ctx); else drawIctFront(ctx, mediaSize.width);
+        ctx.restore();
+      });
+    }
+  }
+  let ictPanelHtml = '';
+  function renderIctPanel() {
+    const el = $('#ictPanel'), s = ictState.s, c = S.ict;
+    if (!el) return;
+    if (!c.on || !c.bias || !s || !st.agg || !st.agg.time.length) { el.hidden = true; return; }
+    const p = biasPanel(s, st.agg.c[st.agg.time.length - 1]);
+    const arrow = v => (v > 0 ? '▲' : v < 0 ? '▼' : '–');
+    const r = p.reads;
+    const reads = [c.bTrend && 'EQ' + arrow(r.trend), c.bMO && 'MO' + arrow(r.mo), c.bPD && 'PD' + arrow(r.pd), c.bAsia && 'AS' + arrow(r.asia), c.bLdn && 'LN' + arrow(r.ldn), c.bNWOG && 'WG' + arrow(r.nwog)].filter(Boolean).join(' ');
+    const lv = x => (x ? `${fmtPx(x.hi)}${x.hiSwept ? 's' : ''} / ${fmtPx(x.lo)}${x.loSwept ? 's' : ''}` : '—');
+    const cls = p.text === 'BULLISH' ? 'bull' : p.text === 'BEARISH' ? 'bear' : '';
+    let html = `<div><span>BIAS</span><b class="${cls}">${p.text} ${p.score}${p.locked ? ' ·lock' : ''}</b></div>` +
+      `<div><span>Reads</span><span>${reads}</span></div>`;
+    if (c.biasLevels) {
+      html += `<div><span style="color:${C.ict.asia}">Asia</span><span>${lv(p.asia)}</span></div>` +
+        `<div><span style="color:${C.ict.ldn}">London</span><span>${lv(p.ldn)}</span></div>` +
+        `<div><span style="color:${C.ict.ny}">NY</span><span>${lv(p.ny)}</span></div>` +
+        `<div><span>Zones</span><span>F${p.counts.fvg} I${p.counts.ifvg} R${p.counts.rb}</span></div>`;
+    }
+    if (html !== ictPanelHtml) { el.innerHTML = html; ictPanelHtml = html; }
+    el.hidden = false;
+  }
+  // Keep the bias panel clear of the price scale and the trade bar at the bottom of the price pane.
+  // Runs on every chart paint, so it follows resizes, pane changes and fullscreen.
+  const uiPos = { top: null, panel: '' };
+  function positionChartUi() {
+    if (!chart) return;
+    const pane = Math.round(chart.panes()[0].getHeight());
+    const q = $('#quickTrade'), qTop = Math.max(8, pane - 50);
+    if (qTop !== uiPos.top) { uiPos.top = qTop; q.style.top = qTop + 'px'; q.style.bottom = 'auto'; }
+    const panel = $('#ictPanel'), scale = Math.round(chart.priceScale('right').width());
+    if (panel.hidden || scale <= 0) return;
+    const pos = S.ict.biasPos || 'tr', ph = panel.offsetHeight, lg = $('#legend');
+    const belowLegend = lg.offsetTop + lg.offsetHeight + 6;
+    let css;
+    if (pos === 'br') css = { top: Math.max(8, pane - ph - 8), right: scale + 8 };
+    else if (pos === 'tl') css = { top: belowLegend, left: 10 };
+    else if (pos === 'bl') css = { top: Math.max(8, (q.hidden ? pane - 8 : qTop - 6) - ph), left: 10 };
+    else css = { top: isPhone() ? belowLegend : 8, right: scale + 8 };
+    const key = `${css.top}|${css.right}|${css.left}`;
+    if (key !== uiPos.panel) {
+      uiPos.panel = key;
+      panel.style.top = css.top + 'px';
+      panel.style.right = css.right != null ? css.right + 'px' : 'auto';
+      panel.style.left = css.left != null ? css.left + 'px' : 'auto';
+    }
+  }
+
   // --------------------------------------------------------- drawings
   const FIB = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
   const isPlan = d => d.type === 'long' || d.type === 'short';
@@ -559,39 +796,57 @@ export function mountTrainer(root, opts) {
     t = clamp(t, 0, 1);
     return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
   }
+  // Hit testing works like TradingView: a drawing is grabbed by its lines, edges and handles.
+  // Inside a box (rectangle, Fibonacci, long/short planner) the chart still pans; a plain click
+  // there selects the drawing, and once it is selected you can drag it by its body.
   function hitDrawing(d, x, y) {
     const g = drawingGeom(d), near = (ax, ay) => ax != null && ay != null && Math.hypot(x - ax, y - ay) <= 8;
-    if (d.type === 'hline') return !bad(g.y) && Math.abs(y - g.y) <= 6 ? { handle: null, cursor: 'ns-resize' } : null;
+    const onH = (x0, x1, yy) => !bad(yy) && Math.abs(y - yy) <= 5 && x >= Math.min(x0, x1) - 4 && x <= Math.max(x0, x1) + 4;
+    const onV = (xx, y0, y1) => !bad(xx) && Math.abs(x - xx) <= 5 && y >= Math.min(y0, y1) - 4 && y <= Math.max(y0, y1) + 4;
+    if (d.type === 'hline') return !bad(g.y) && Math.abs(y - g.y) <= 6 ? { handle: null, cursor: 'ns-resize', part: 'edge' } : null;
     if (isPlan(d)) {
       if (bad(g.x1, g.x2, g.yE, g.yS, g.yT)) return null;
       const x0 = Math.min(g.x1, g.x2), x1 = x0 + Math.max(8, Math.abs(g.x2 - g.x1));
-      if (near(x0, g.yE)) return { handle: 'entry', cursor: 'move' };
-      if (near(x0, g.yS)) return { handle: 'stop', cursor: 'ns-resize' };
-      if (near(x0, g.yT)) return { handle: 'target', cursor: 'ns-resize' };
-      if (near(x1, g.yE)) return { handle: 'right', cursor: 'ew-resize' };
+      if (near(x0, g.yE)) return { handle: 'entry', cursor: 'move', part: 'handle' };
+      if (near(x0, g.yS)) return { handle: 'stop', cursor: 'ns-resize', part: 'handle' };
+      if (near(x0, g.yT)) return { handle: 'target', cursor: 'ns-resize', part: 'handle' };
+      if (near(x1, g.yE)) return { handle: 'right', cursor: 'ew-resize', part: 'handle' };
+      if (onH(x0, x1, g.yS)) return { handle: 'stop', cursor: 'ns-resize', part: 'edge' };
+      if (onH(x0, x1, g.yT)) return { handle: 'target', cursor: 'ns-resize', part: 'edge' };
+      if (onH(x0, x1, g.yE)) return { handle: null, cursor: 'move', part: 'edge' };
       const top = Math.min(g.yS, g.yT), btm = Math.max(g.yS, g.yT);
-      return x >= x0 && x <= x1 && y >= top && y <= btm ? { handle: null, cursor: 'move' } : null;
+      return x >= x0 && x <= x1 && y >= top && y <= btm ? { handle: null, cursor: 'move', part: 'body' } : null;
     }
     if (bad(g.x1, g.y1, g.x2, g.y2)) return null;
-    if (near(g.x1, g.y1)) return { handle: 'p1', cursor: 'pointer' };
-    if (near(g.x2, g.y2)) return { handle: 'p2', cursor: 'pointer' };
-    if (d.type === 'trend') return distToSeg(x, y, g.x1, g.y1, g.x2, g.y2) <= 6 ? { handle: null, cursor: 'move' } : null;
+    if (near(g.x1, g.y1)) return { handle: 'p1', cursor: 'pointer', part: 'handle' };
+    if (near(g.x2, g.y2)) return { handle: 'p2', cursor: 'pointer', part: 'handle' };
+    if (d.type === 'trend') return distToSeg(x, y, g.x1, g.y1, g.x2, g.y2) <= 6 ? { handle: null, cursor: 'move', part: 'edge' } : null;
     if (d.type === 'rect') {
       const x0 = Math.min(g.x1, g.x2), x1 = Math.max(g.x1, g.x2), y0 = Math.min(g.y1, g.y2), y1 = Math.max(g.y1, g.y2);
-      return x >= x0 - 4 && x <= x1 + 4 && y >= y0 - 4 && y <= y1 + 4 ? { handle: null, cursor: 'move' } : null;
+      if (onH(x0, x1, y0) || onH(x0, x1, y1) || onV(x0, y0, y1) || onV(x1, y0, y1)) return { handle: null, cursor: 'move', part: 'edge' };
+      return x > x0 && x < x1 && y > y0 && y < y1 ? { handle: null, cursor: 'move', part: 'body' } : null;
     }
     if (d.type === 'fib') {
       const xa = Math.min(g.x1, g.x2), xb = Math.max(g.x1, g.x2, xa + 90);
-      return x >= xa && x <= xb && y >= Math.min(g.y1, g.y2) - 4 && y <= Math.max(g.y1, g.y2) + 4 ? { handle: null, cursor: 'move' } : null;
+      for (const L of FIB) {
+        const yy = priceToY(d.p2.p + (d.p1.p - d.p2.p) * L);
+        if (onH(xa, xb, yy)) return { handle: null, cursor: 'move', part: 'edge' };
+      }
+      if (distToSeg(x, y, g.x1, g.y1, g.x2, g.y2) <= 5) return { handle: null, cursor: 'move', part: 'edge' };
+      return x >= xa && x <= xb && y >= Math.min(g.y1, g.y2) && y <= Math.max(g.y1, g.y2) ? { handle: null, cursor: 'move', part: 'body' } : null;
     }
     return null;
   }
+  /** Lines, edges and handles of any drawing win over the inside of another; topmost first. */
   function drawingAt(x, y) {
+    let body = null;
     for (let k = st.drawings.length - 1; k >= 0; k--) {
       const h = hitDrawing(st.drawings[k], x, y);
-      if (h) return Object.assign({ d: st.drawings[k] }, h);
+      if (!h) continue;
+      if (h.part !== 'body') return Object.assign({ d: st.drawings[k] }, h);
+      if (!body) body = Object.assign({ d: st.drawings[k] }, h);
     }
-    return null;
+    return body;
   }
   class DrawingPrimitive {
     constructor() {
@@ -602,6 +857,7 @@ export function mountTrainer(root, opts) {
     detached() { this.req = null; }
     paneViews() { return this.views; }
     draw(tg) {
+      positionChartUi();
       if (!st.agg) return;
       tg.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
         for (const d of st.drawings) renderDrawing(ctx, d, mediaSize.width, d.id === st.selected);
@@ -611,12 +867,14 @@ export function mountTrainer(root, opts) {
     hitTest(x, y) {
       if (st.tool !== 'cursor') return { externalId: 'tool', zOrder: 'top', cursorStyle: 'crosshair' };
       const h = drawingAt(x, y);
-      return h ? { externalId: 'drawing', zOrder: 'top', cursorStyle: h.cursor } : null;
+      if (!h || (h.part === 'body' && h.d.id !== st.selected)) return null; // the inside of an unselected box pans
+      return { externalId: 'drawing', zOrder: 'top', cursorStyle: h.cursor };
     }
   }
   function requestOverlays() {
     if (overlay && overlay.req) overlay.req();
     if (drawPrim && drawPrim.req) drawPrim.req();
+    if (ictPrim && ictPrim.req) ictPrim.req();
   }
 
   // ------------------------------------------------ chart interaction
@@ -635,7 +893,7 @@ export function mountTrainer(root, opts) {
 
   function onChartDown(e) {
     if (!st.agg || (e.type === 'mousedown' && e.button !== 0)) return;
-    if (e.target && e.target.closest && e.target.closest('#drawActions, #dropHint')) return;
+    if (e.target && e.target.closest && e.target.closest('#drawActions, #dropHint, #quickTrade, #ictPanel')) return;
     const p = localPt(e);
     if (!inMain(p)) return;
     st.lastPt = p;
@@ -655,6 +913,11 @@ export function mountTrainer(root, opts) {
       return;
     }
     const dh = drawingAt(p.x, p.y);
+    if (dh && dh.part === 'body' && dh.d.id !== st.selected) {
+      // Inside an unselected box: let the chart pan; select it only if this turns out to be a click.
+      st.pendingSel = { id: dh.d.id, start: p };
+      return;
+    }
     if (dh) {
       block(e);
       select(dh.d.id);
@@ -677,8 +940,13 @@ export function mountTrainer(root, opts) {
       if (price != null) { overlay.drag = { kind: D.hit.kind, id: D.hit.id, price: snapTick(price) }; requestOverlays(); }
     } else moveDrawing(D, p);
   }
-  function onWindowUp() {
+  function onWindowUp(e) {
     if (st.creating) { creationUp(); return; }
+    if (st.pendingSel) {
+      const ps = st.pendingSel, p = e ? localPt(e) : ps.start;
+      st.pendingSel = null;
+      if (Math.abs(p.x - ps.start.x) + Math.abs(p.y - ps.start.y) <= 4 && st.drawings.some(d => d.id === ps.id)) select(ps.id);
+    }
     const D = st.drag;
     if (!D) return;
     st.drag = null;
@@ -1105,12 +1373,12 @@ export function mountTrainer(root, opts) {
     requestAnimationFrame(() => {
       uiQueued = false;
       if (destroyed) return;
-      renderClock(); renderStrip(); renderTicket(); renderAccount(); updateLegend();
+      renderClock(); renderStrip(); renderTicket(); renderAccount(); updateLegend(); renderQuickTrade();
       if (st.selected) updateDrawActions();
     });
   }
   function renderEverything() {
-    renderTransport(); renderClock(); renderStrip(); renderStripMarks(); renderTicket(); renderAccount(); renderCoach(); renderPanels(); updateLegend();
+    renderTransport(); renderClock(); renderStrip(); renderStripMarks(); renderTicket(); renderAccount(); renderCoach(); renderPanels(); updateLegend(); renderQuickTrade();
   }
   function renderDataChip() {
     const kind = st.ds && st.ds.kind;
@@ -1562,10 +1830,48 @@ export function mountTrainer(root, opts) {
       `<label class="chk"><input type="checkbox" data-ind="vol.on" ${I.vol.on ? 'checked' : ''}> Volume</label><span></span><span></span>` +
       `<label class="chk"><input type="checkbox" data-ind="rsi.on" ${I.rsi.on ? 'checked' : ''}> RSI</label>${num('rsi.len', I.rsi.len, 2, 100)}${sw('--series-3')}` +
       `<label class="chk"><input type="checkbox" data-ind="macd.on" ${I.macd.on ? 'checked' : ''}> MACD</label><span style="display:flex;gap:4px">${num('macd.fast', I.macd.fast, 2, 100)}${num('macd.slow', I.macd.slow, 3, 200)}${num('macd.signal', I.macd.signal, 2, 100)}</span>${sw('--series-1')}` +
-      `</div><p>Indicators are calculated only from bars already revealed, on whichever timeframe you are viewing.</p>`;
+      `</div><p>Indicators are calculated only from bars already revealed, on whichever timeframe you are viewing.</p>` +
+      ictSettingsHtml();
+  }
+  function ictSettingsHtml() {
+    const T = S.ict;
+    const chk = (k, label) => `<label class="chk"><input type="checkbox" data-ict="${k}" ${T[k] ? 'checked' : ''}> ${label}</label>`;
+    const sel = (k, opts, label) => `<label class="ict-row"><span>${label}</span><select class="field small" data-ict="${k}">${opts.map(([v, l]) => `<option value="${v}" ${T[k] === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>`;
+    return `<div class="ict-set"><h3>ICT Levels Helper</h3>` +
+      `<label class="chk ict-master"><input type="checkbox" data-ict="on" ${T.on ? 'checked' : ''}> Show FVGs, IFVGs, rejection blocks, sessions and bias</label>` +
+      `<div class="ict-body" ${T.on ? '' : 'hidden'}>` +
+      `<div class="ict-checks">${chk('fvg', 'Fair value gaps')}${chk('ifvg', 'Inverse FVGs')}${chk('rb', 'Rejection blocks')}${chk('fvgCE', 'CE midlines')}` +
+      `${chk('asia', 'Asia high/low')}${chk('london', 'London high/low')}${chk('ny', 'New York high/low')}${chk('nwog', 'New week opening gap')}` +
+      `${chk('pd', 'Previous day high/low')}${chk('mo', '00:00 true day open')}${chk('bias', 'Daily bias panel')}${chk('biasLock', 'Lock bias at 09:30')}</div>` +
+      `<label class="ict-row"><span>Minimum gap</span><span class="ict-num"><input type="number" class="field small" data-ict="fvgMinAtr" value="${T.fvgMinAtr}" min="0" max="3" step="0.05" aria-label="Minimum gap size in ATR"> × ATR(14)</span></label>` +
+      sel('mit', [['touch', 'First touch'], ['ce', '50% (CE)'], ['full', 'Full fill']], 'Mitigated at') +
+      sel('inv', [['body', 'Body close through'], ['wick', 'Wick through']], 'Invalidated by') +
+      sel('biasPos', [['tr', 'Top right'], ['br', 'Bottom right'], ['tl', 'Top left'], ['bl', 'Bottom left']], 'Bias panel') +
+      `<div class="ict-checks">${chk('biasLevels', 'Levels in the bias panel')}${chk('fvgDisp', 'Only gaps from a displacement candle')}${chk('rbSweep', 'Blocks need a liquidity sweep')}${chk('dedup', 'Collapse overlapping zones')}</div>` +
+      `</div><p>Your TradingView indicator (v5.0). Worked out on closed candles only, so it never shows what hasn't happened yet.</p></div>`;
+  }
+  function onIctChange(t) {
+    const k = t.dataset.ict, T = S.ict;
+    if (t.type === 'checkbox') T[k] = t.checked;
+    else if (t.tagName === 'SELECT') {
+      T[k] = t.value;
+      if (k === 'mit') T.rbMit = t.value;   // one setting for gaps and blocks
+      if (k === 'inv') T.rbInv = t.value;
+    } else {
+      const v = parseFloat(t.value);
+      if (!isFinite(v)) return;
+      T[k] = clamp(v, 0, 3);
+    }
+    saveSettings();
+    if (k === 'on') { const body = $('#popIndicators .ict-body'); if (body) body.hidden = !T.on; }
+    if (k === 'biasPos' || k === 'biasLevels' || k === 'bias') { renderIctPanel(); requestOverlays(); return; } // display only
+    ictState.s = null;
+    if (st.agg) { syncIct(); requestOverlays(); renderIctPanel(); }
   }
   function onIndicatorChange(e) {
-    const t = e.target, path = t.dataset.ind;
+    const t = e.target;
+    if (t.dataset.ict) { onIctChange(t); return; }
+    const path = t.dataset.ind;
     if (!path) return;
     const keys = path.split('.');
     let o = S.ind;
@@ -1837,7 +2143,7 @@ export function mountTrainer(root, opts) {
     $('#btnSell').addEventListener('click', () => submit(-1));
     $('#posBox').addEventListener('click', e => { const b = e.target.closest('[data-pos]'); if (b) posAction(b.dataset.pos); });
 
-    $('#tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) setTab(b.dataset.tab); });
+    $('#tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (!b) return; if (S.layout.bottomMin) setBottomMin(false); setTab(b.dataset.tab); });
     $('#tabs').addEventListener('keydown', e => {
       if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
       const tabs = $$('#tabs [data-tab]'), i = tabs.findIndex(t => t.dataset.tab === st.tab);
@@ -1919,7 +2225,8 @@ export function mountTrainer(root, opts) {
       if (openPop) { const b = openPop.btn; closePopovers(); b.focus(); return; }
       if (st.creating || st.tool !== 'cursor') { setTool('cursor'); return; }
       if (st.pickPrice) { setPickPrice(false); return; }
-      if (st.selected) select(null);
+      if (st.selected) { select(null); return; }
+      if (isFull() && !document.fullscreenElement) setFull(false);
       return;
     }
     if (typing || $('#modalRoot').firstChild) return;
@@ -1930,6 +2237,7 @@ export function mountTrainer(root, opts) {
       return;
     }
     if (e.ctrlKey || e.metaKey) return;
+    if (e.shiftKey && (e.key === 'F' || e.key === 'f')) { e.preventDefault(); setFull(!isFull()); return; }
     if (e.key === ' ' || e.code === 'Space') {
       e.preventDefault();
       if (document.activeElement && document.activeElement.tagName === 'BUTTON') document.activeElement.blur();
@@ -1958,6 +2266,105 @@ export function mountTrainer(root, opts) {
     if (st.tab === 'stats' || st.tab === 'journal') renderPanels();
   }
 
+
+  // ------------------------------------------------------------ layout
+  // Bottom panel: drag its top edge to resize, or fold it down to the tabs.
+  // Side panel: can be hidden for a wider chart; the trade bar on the chart takes over.
+  // Fullscreen: the whole replay fills the screen (browser fullscreen where available).
+  const isPhone = () => window.matchMedia('(max-width: 900px)').matches;
+  const isFull = () => root.classList.contains('tt-full');
+  function applyLayout() {
+    const tr = $('#trainer'), L = S.layout;
+    if (L.bottomH > 0 && !isPhone()) tr.style.setProperty('--bottom-h', Math.round(L.bottomH) + 'px');
+    else tr.style.removeProperty('--bottom-h');
+    tr.classList.toggle('bottom-min', !!L.bottomMin);
+    const bb = $('#btnBottom');
+    bb.setAttribute('aria-expanded', String(!L.bottomMin));
+    bb.setAttribute('aria-label', L.bottomMin ? 'Show the bottom panel' : 'Hide the bottom panel');
+    bb.title = L.bottomMin ? 'Show the panel' : 'Hide the panel';
+    $('.workspace', root).classList.toggle('side-off', !L.side);
+    $('#btnSide').setAttribute('aria-pressed', String(!L.side));
+    $('#btnSide').title = L.side ? 'Hide the side panel (wider chart)' : 'Show the side panel';
+    $('#btnFull').setAttribute('aria-pressed', String(isFull()));
+    $('#btnFull').title = isFull() ? 'Exit fullscreen (Shift+F)' : 'Fullscreen (Shift+F)';
+    $('#btnFull').setAttribute('aria-label', isFull() ? 'Exit fullscreen' : 'Fullscreen');
+    renderQuickTrade();
+  }
+  function setBottomMin(min) {
+    S.layout.bottomMin = min;
+    saveSettings();
+    applyLayout();
+  }
+  function setFull(on) {
+    if (on === isFull()) return;
+    root.classList.toggle('tt-full', on);
+    if (on && root.requestFullscreen && !document.fullscreenElement) root.requestFullscreen().catch(() => { /* not allowed here: the full-window layout still applies */ });
+    if (!on && document.fullscreenElement === root && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+    applyLayout();
+  }
+  function renderQuickTrade() {
+    const el = $('#quickTrade');
+    const show = !!st.rep && (!S.layout.side || (isFull() && isPhone()));
+    el.hidden = !show;
+    if (!show) return;
+    $('#qtQty').textContent = String(S.qty);
+    const b = st.broker, pos = $('#qtPos');
+    if (b && b.pos) {
+      const u = E.unrealized(b);
+      pos.className = 'qt-pos ' + signCls(u);
+      pos.textContent = `${b.pos.side === 1 ? 'Long' : 'Short'} ${b.pos.qty} · ${fmtUsd(u)}`;
+    } else { pos.className = 'qt-pos'; pos.textContent = 'Flat'; }
+    $('#qtBuySub').textContent = S.slOn || S.tpOn ? 'with bracket' : 'market';
+    $('#qtSellSub').textContent = $('#qtBuySub').textContent;
+  }
+  function wireLayout() {
+    const sp = $('#splitBottom'), tr = $('#trainer');
+    let drag = null;
+    sp.addEventListener('pointerdown', e => {
+      if (isPhone()) return;
+      e.preventDefault();
+      sp.setPointerCapture(e.pointerId);
+      drag = { y: e.clientY, h: $('.bottom', root).getBoundingClientRect().height };
+      if (S.layout.bottomMin) { S.layout.bottomMin = false; tr.classList.remove('bottom-min'); drag.h = 44; }
+      sp.classList.add('drag');
+    });
+    sp.addEventListener('pointermove', e => {
+      if (!drag) return;
+      const max = tr.getBoundingClientRect().height * 0.62;
+      const h = clamp(drag.h + (drag.y - e.clientY), 90, max);
+      tr.style.setProperty('--bottom-h', Math.round(h) + 'px');
+      S.layout.bottomH = h;
+    });
+    const end = () => { if (!drag) return; drag = null; sp.classList.remove('drag'); saveSettings(); applyLayout(); };
+    sp.addEventListener('pointerup', end);
+    sp.addEventListener('pointercancel', end);
+    sp.addEventListener('dblclick', () => setBottomMin(!S.layout.bottomMin));
+    sp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); setBottomMin(!S.layout.bottomMin); return; }
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      e.preventDefault();
+      const cur = $('.bottom', root).getBoundingClientRect().height;
+      S.layout.bottomMin = false;
+      S.layout.bottomH = clamp(cur + (e.key === 'ArrowUp' ? 24 : -24), 90, tr.getBoundingClientRect().height * 0.62);
+      saveSettings(); applyLayout();
+    });
+    $('#btnBottom').addEventListener('click', () => setBottomMin(!S.layout.bottomMin));
+    $('#btnSide').addEventListener('click', () => { S.layout.side = !S.layout.side; saveSettings(); applyLayout(); });
+    $('#btnFull').addEventListener('click', () => setFull(!isFull()));
+    on(document, 'fullscreenchange', () => { if (!document.fullscreenElement && isFull()) { root.classList.remove('tt-full'); applyLayout(); } });
+    on(window.matchMedia('(max-width: 900px)'), 'change', applyLayout);
+    $('#quickTrade').addEventListener('click', e => {
+      const b = e.target.closest('[data-qt]');
+      if (!b) return;
+      const a = b.dataset.qt;
+      if (a === 'buy') submitMarket(1);
+      else if (a === 'sell') submitMarket(-1);
+      else if (a === 'flat') flatten();
+      else if (a === 'minus' || a === 'plus') stepperClick('qty', a === 'plus' ? 1 : -1);
+      renderQuickTrade();
+    });
+  }
+
   // ================================================================ boot
   async function boot() {
     readColors();
@@ -1965,6 +2372,8 @@ export function mountTrainer(root, opts) {
     $$('#tfGroup [data-tf]').forEach(x => x.setAttribute('aria-pressed', String(+x.dataset.tf === S.tf)));
     $('#btnMagnet').setAttribute('aria-pressed', String(S.magnet));
     wire();
+    wireLayout();
+    applyLayout();
     renderStripStatic();
     if (!LWC || !LWC.createChart) {
       $('#chartEmpty').textContent = 'The chart library did not load. Check your connection and reload the page.';
@@ -1973,6 +2382,8 @@ export function mountTrainer(root, opts) {
     }
     chart = LWC.createChart($('#chart'), chartOptions());
     candle = chart.addSeries(LWC.CandlestickSeries, candleOptions());
+    ictPrim = new IctPrimitive();
+    candle.attachPrimitive(ictPrim);
     drawPrim = new DrawingPrimitive();
     candle.attachPrimitive(drawPrim);
     overlay = new OverlayPrimitive();
@@ -2028,13 +2439,15 @@ export function mountTrainer(root, opts) {
       } catch (e) { st.csv = null; }
     }
   }
-  if (opts.debug) window.__tt = { st, S, E, get chart() { return chart; }, journal, y: p => priceToY(p) };
+  if (opts.debug) window.__tt = { st, S, E, get chart() { return chart; }, ict: () => ictState.s, journal, y: p => priceToY(p), x: i => chart.timeScale().logicalToCoordinate(i) };
   boot();
   return {
     destroy() {
       destroyed = true;
       pause();
       closePopovers();
+      if (document.fullscreenElement === root && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+      root.classList.remove('tt-full');
       cleanups.forEach(f => { try { f(); } catch (e) { /* already removed */ } });
       try { if (chart) chart.remove(); } catch (e) { /* already removed */ }
       chart = null;

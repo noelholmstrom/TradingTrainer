@@ -87,7 +87,7 @@ button, input, select { font: inherit; color: inherit; }
 .trainer {
   height: calc(100dvh - var(--nav-h));
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) minmax(180px, 28%);
+  grid-template-rows: auto minmax(0, 1fr) var(--bottom-h, clamp(130px, 20%, 210px));
   padding-left: max(16px, env(safe-area-inset-left, 0px));
   padding-right: max(16px, env(safe-area-inset-right, 0px));
   padding-block: 0 12px;
@@ -273,8 +273,9 @@ select.field { padding-right: 4px; }
 .coach-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12.5px; color: var(--text-2); }
 
 /* ---------- bottom panel */
-.bottom { display: flex; flex-direction: column; min-height: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+.bottom { position: relative; display: flex; flex-direction: column; min-height: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); }
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); padding: 0 8px; overflow-x: auto; flex: none; }
+.bottom-min .tabs { border-bottom-color: transparent; }
 .tabs button {
   border: 0; background: transparent; padding: 8px 10px; cursor: pointer; color: var(--muted); font-weight: 600; font-size: 13px;
   border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap;
@@ -370,6 +371,67 @@ table.data tr.note-row td { white-space: normal; background: var(--raised); }
 .kbd-list { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 13px; align-items: center; }
 .kbd-list kbd { font-family: var(--font-mono); font-size: 11.5px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: var(--raised-2); white-space: nowrap; justify-self: start; }
 
+
+/* ---------- layout controls: resizable bottom panel, hideable side panel, fullscreen */
+.trainer.bottom-min { --bottom-h: 42px; }
+.trainer.bottom-min .bottom .panel { display: none; }
+.splitter { position: absolute; left: 0; right: 0; top: -10px; height: 10px; cursor: row-resize; z-index: 4; touch-action: none; }
+.splitter::after { content: ''; position: absolute; left: 50%; top: 3px; width: 44px; height: 4px; margin-left: -22px; border-radius: 2px; background: var(--line-strong); opacity: 0; transition: opacity .15s; }
+.splitter:hover::after, .splitter:focus-visible::after, .splitter.drag::after { opacity: 1; }
+.splitter:focus-visible { outline: none; }
+.tabs-toggle { margin-left: auto; flex: none; align-self: center; width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--text-2); cursor: pointer; }
+.tabs-toggle:hover { background: var(--raised-2); color: var(--text); }
+.tabs-toggle svg { width: 16px; height: 16px; transition: transform .15s; }
+.tabs-toggle[aria-expanded="false"] svg { transform: rotate(180deg); }
+.workspace.side-off { grid-template-columns: 40px minmax(0, 1fr); }
+.workspace.side-off .side { display: none; }
+#btnSide[aria-pressed="true"], #btnFull[aria-pressed="true"] { color: var(--accent); }
+#btnFull .ic-exit, #btnFull[aria-pressed="true"] .ic-enter { display: none; }
+#btnFull[aria-pressed="true"] .ic-exit { display: block; }
+.tt-full { position: fixed; inset: 0; z-index: 60; background: var(--bg); overflow: auto; }
+.tt-full .trainer { height: 100dvh; padding-top: env(safe-area-inset-top, 0px); }
+
+/* ---------- quick trade bar on the chart (side panel hidden, or fullscreen on a phone) */
+.quick-trade {
+  position: absolute; left: 10px; bottom: 34px; z-index: 4; display: flex; align-items: stretch; gap: 4px;
+  padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--raised) 92%, transparent);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .28); font-size: 12px;
+}
+.quick-trade[hidden] { display: none; }
+.quick-trade button { border: 0; border-radius: 5px; cursor: pointer; font: inherit; }
+.quick-trade .qt-buy, .quick-trade .qt-sell { display: grid; padding: 3px 12px; color: #fff; font-weight: 700; line-height: 1.1; text-align: left; }
+.quick-trade .qt-buy { background: var(--buy); }
+.quick-trade .qt-sell { background: var(--down); }
+.quick-trade small { font-weight: 500; font-size: 10px; opacity: .85; }
+.quick-trade .qt-qty { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 5px; }
+.quick-trade .qt-qty button { width: 24px; height: 100%; background: transparent; color: var(--text-2); }
+.quick-trade .qt-qty b { min-width: 22px; text-align: center; font-family: var(--font-mono); font-weight: 500; }
+.quick-trade .qt-flat { padding: 0 10px; background: var(--raised-2); color: var(--text); font-weight: 600; }
+.quick-trade .qt-pos { align-self: center; padding: 0 6px; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2); white-space: nowrap; }
+
+/* ---------- ICT Levels Helper: daily bias panel and settings */
+.ict-panel {
+  position: absolute; top: 8px; right: 70px; z-index: 3; pointer-events: none;
+  display: grid; gap: 1px; padding: 4px; border-radius: 4px; background: rgba(0, 0, 0, .62); color: #c9ccd4;
+  font-family: var(--font-mono); font-size: 10.5px; line-height: 1.35; max-width: 46%;
+}
+.ict-panel[hidden] { display: none; }
+.ict-panel > div { display: grid; grid-template-columns: auto 1fr; gap: 10px; padding: 1px 5px; background: rgba(255, 255, 255, .04); }
+.ict-panel > div > span:first-child { color: #fff; }
+.ict-panel b { font-weight: 600; color: #B2B5BE; }
+.ict-panel b.bull { color: #00E676; }
+.ict-panel b.bear { color: #FF5252; }
+.ict-set { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.ict-set h3 { margin-top: 0; }
+.ict-master { font-weight: 600; }
+.ict-body { display: grid; gap: 8px; margin-top: 8px; }
+.ict-body[hidden] { display: none; }
+.ict-checks { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 13px; }
+.ict-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+.ict-row select { width: auto; }
+.ict-num { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
+.ict-num input { width: 70px; }
+
 /* ---------- narrow screens: stack everything, let the page scroll */
 @media (max-width: 1080px) {
   .workspace { grid-template-columns: 40px minmax(0, 1fr) 272px; }
@@ -383,7 +445,19 @@ table.data tr.note-row td { white-space: normal; background: var(--raised); }
   .chart-wrap { height: 62vh; min-height: 330px; }
   .side { overflow: visible; }
   .bottom { min-height: 320px; }
+  .trainer.bottom-min .bottom { min-height: 0; }
+  .splitter { display: none; }
   .stats-layout { grid-template-columns: 1fr; }
+  .tt-full { overflow: hidden; }
+  .tt-full .trainer { height: 100dvh; overflow: hidden; gap: 8px; padding-bottom: max(8px, env(safe-area-inset-bottom, 0px)); }
+  .tt-full .workspace, .tt-full .chart-col { flex: 1; min-height: 0; }
+  .tt-full .chart-wrap { flex: 1; height: auto; min-height: 220px; }
+  .tt-full .side, .tt-full .bottom { display: none; }
+  .tt-full .deck-row:first-child, .tt-full .strip, .tt-full .clock .d, .tt-full #btnHelp, .tt-full #btnSide { display: none; }
+  .tt-full .topbar { padding-block: 6px; gap: 6px; }
+  .ict-panel { max-width: 62%; font-size: 9.5px; }
+  .ict-panel > div:nth-child(n+3) { display: none; }
+  .ict-checks { grid-template-columns: 1fr; }
   .legend { max-width: calc(100% - 70px); }
 }
 @media (max-width: 520px) {

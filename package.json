@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "node tests/engine.test.mjs"
+    "test": "node tests/engine.test.mjs && node tests/ict.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "1.6.0",

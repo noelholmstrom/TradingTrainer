@@ -21,6 +21,13 @@ export const TRAINER_MARKUP = String.raw`<div class="trainer" id="trainer">
       <span class="data-chip"><i class="dot" id="dataDot"></i><span id="dataLabel">Sample data</span></span>
     </button>
     <span class="spacer"></span>
+    <button type="button" class="btn icon" id="btnSide" aria-pressed="false" aria-label="Hide the side panel">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M10.5 2.5v11"/></svg>
+    </button>
+    <button type="button" class="btn icon" id="btnFull" aria-pressed="false" aria-label="Fullscreen">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" class="ic-enter"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg>
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" class="ic-exit"><path d="M6 2v4H2M14 6h-4V2M10 14v-4h4M2 10h4v4"/></svg>
+    </button>
     <button type="button" class="btn icon" id="btnSettings" aria-label="Simulation settings" aria-haspopup="dialog" aria-expanded="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>
     </button>
@@ -69,6 +76,14 @@ export const TRAINER_MARKUP = String.raw`<div class="trainer" id="trainer">
         <div class="draw-actions" id="drawActions" hidden></div>
         <div class="drop-hint" id="dropHint" hidden>Drop the CSV to import it</div>
         <div class="chart-empty" id="chartEmpty">Loading the chart…</div>
+        <div class="ict-panel" id="ictPanel" hidden></div>
+        <div class="quick-trade" id="quickTrade" role="group" aria-label="Quick trade" hidden>
+          <button type="button" class="qt-sell" data-qt="sell" title="Sell at market (S)"><span>Sell</span><small id="qtSellSub">market</small></button>
+          <span class="qt-qty"><button type="button" data-qt="minus" aria-label="Fewer contracts">−</button><b id="qtQty">1</b><button type="button" data-qt="plus" aria-label="More contracts">+</button></span>
+          <button type="button" class="qt-buy" data-qt="buy" title="Buy at market (B)"><span>Buy</span><small id="qtBuySub">market</small></button>
+          <button type="button" class="qt-flat" data-qt="flat" title="Flatten (F)">Flat</button>
+          <span class="qt-pos" id="qtPos">Flat</span>
+        </div>
       </div>
 
       <div class="deck" id="deck">
@@ -186,11 +201,15 @@ export const TRAINER_MARKUP = String.raw`<div class="trainer" id="trainer">
   </main>
 
   <section class="bottom" aria-label="Orders, trades and statistics">
+    <div class="splitter" id="splitBottom" role="separator" aria-orientation="horizontal" aria-label="Resize the bottom panel. Arrow keys resize, Enter folds it." tabindex="0"></div>
     <div class="tabs" role="tablist" id="tabs">
       <button type="button" role="tab" data-tab="orders" aria-selected="true" id="tab-orders" aria-controls="panel-orders">Orders <span class="count" id="cntOrders">0</span></button>
       <button type="button" role="tab" data-tab="trades" aria-selected="false" id="tab-trades" aria-controls="panel-trades">Trades <span class="count" id="cntTrades">0</span></button>
       <button type="button" role="tab" data-tab="stats" aria-selected="false" id="tab-stats" aria-controls="panel-stats">Session stats</button>
       <button type="button" role="tab" data-tab="journal" aria-selected="false" id="tab-journal" aria-controls="panel-journal">Journal <span class="count" id="cntJournal"></span></button>
+      <button type="button" class="tabs-toggle" id="btnBottom" aria-expanded="true" aria-label="Hide the bottom panel">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>
+      </button>
     </div>
     <div class="panel" role="tabpanel" id="panel-orders" aria-labelledby="tab-orders"></div>
     <div class="panel" role="tabpanel" id="panel-trades" aria-labelledby="tab-trades" hidden></div>
@@ -210,6 +229,7 @@ export const TRAINER_MARKUP = String.raw`<div class="trainer" id="trainer">
     <kbd>B</kbd><span>Buy at market (uses the ticket's size, stop and target)</span>
     <kbd>S</kbd><span>Sell at market</span>
     <kbd>F</kbd><span>Flatten the position</span>
+    <kbd>Shift + F</kbd><span>Fullscreen on and off</span>
     <kbd>Alt + T / H / R / F</kbd><span>Trend line, horizontal line, rectangle, Fibonacci</span>
     <kbd>Alt + L / S</kbd><span>Long or short position planner</span>
     <kbd>Delete</kbd><span>Remove the selected drawing</span>

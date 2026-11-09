@@ -4,7 +4,8 @@ Practise trading Nasdaq-100 futures (MNQ and NQ) on replayed sessions. Pick a da
 
 - **Real data:** actual CME Nasdaq-100 futures for any day since June 2010, through Databento (each trader's own key, or the site owner's).
 - **Replay:** any day or a random day with the date hidden; start at the Globex open, London, 08:30 or the 09:30 cash open; play, step or skip ahead. Bars after the cursor stay hidden.
-- **Chart:** 1m to 1h, EMA, VWAP, Bollinger Bands, volume, RSI, MACD, trend lines, horizontal lines, rectangles, Fibonacci and long/short position planners.
+- **Chart:** 1m to 1h, EMA, VWAP, Bollinger Bands, volume, RSI, MACD, trend lines, horizontal lines, rectangles, Fibonacci and long/short position planners. Drawings are grabbed by their lines and handles, so you can still pan inside them. Resize or fold the bottom panel, hide the side panel (a trade bar appears on the chart) or go fullscreen with Shift+F.
+- **ICT Levels Helper:** a port of Noel's TradingView indicator (v5.0): FVGs with CE and mitigation vs invalidation, IFVGs, rejection blocks, Asia/London/New York ranges after each session closes, the New Week Opening Gap, previous day high/low, the 00:00 open and a daily bias panel locked at the New York open. Worked out on closed candles only; settings are under **Indicators**.
 - **Orders:** market, limit and stop with stop and target brackets you can drag on the chart; commission, slippage and gap fills.
 - **Coach:** rule-based notes on every trade (stop size against ATR, trend, chasing, key levels, sweeps, fair value gaps, timing, exits) and an optional AI review written by Claude.
 - **Learn:** six lessons with replay exercises and quizzes.
@@ -110,6 +111,7 @@ src/app/            pages: / (home), /replay, /learn, /stats, /login, /account, 
 src/components/     React components (nav, trainer host, stats, lessons, auth forms)
 src/lib/engine.js   market data, indicators, order simulator, statistics, coaching rules (no DOM)
 src/lib/trainer.js  the replay screen: chart, orders on the chart, drawings, panels
+src/lib/ict.js      ICT Levels Helper: zones, sessions, opening gap, daily levels and bias (no DOM)
 src/lib/journal.ts  where sessions are saved: browser (guest) or Supabase (signed in)
 src/lib/lessons.ts  lesson text and quizzes
 src/lib/coachPrompt.ts  the AI coach prompt and input checks
@@ -122,11 +124,12 @@ tests/              engine tests (npm test) and a browser test (tests/e2e.mjs)
 ## Tests
 
 ```sh
-npm test                                  # engine: fills, P/L, indicators, CSV, coaching rules
+npm test                                  # engine (fills, P/L, indicators, CSV, coaching) and ICT levels
 npm run typecheck
 npm run build && npm start                # then, in a second terminal:
 npm i -D playwright && npx playwright install chromium
 node tests/e2e.mjs http://localhost:3000  # clicks through the whole site in a real browser
+node tests/e2e-chart.mjs http://localhost:3000  # drawings vs panning, panels, fullscreen, ICT overlay
 ```
 
 To test real data without a Databento key, run the stand-in API and point the app at it:
